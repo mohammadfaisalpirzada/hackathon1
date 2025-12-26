@@ -2,8 +2,8 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch: {}
+    branches: [ "main" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,8 +34,8 @@ jobs:
         env:
           DOCUSAURUS_URL: https://${{ github.repository_owner }}.github.io
           DOCUSAURUS_BASE_URL: /${{ github.event.repository.name }}/
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPO: ${{ github.event.repository.name }}
         run: npm run build
 
       - name: Upload artifact
