@@ -64,9 +64,10 @@ const config: Config = {
       title: "Physical AI & Humanoid Robotics (Q2)",
       items: [
         { to: "/", label: "Docs", position: "left" },
-        { to: "/labs", label: "Labs", position: "left" },
+                { to: "/labs", label: "Labs", position: "left" },
         { to: "/troubleshooting", label: "Troubleshooting", position: "left" },
         { to: "/reference", label: "Reference", position: "left" },
+        { to: "/chat", label: "MasterSahub_Chatbot", position: "left" },
         {
           href: process.env.GITHUB_REPOSITORY
             ? `https://github.com/${process.env.GITHUB_REPOSITORY}`
