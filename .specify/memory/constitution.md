@@ -1,50 +1,48 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# Project Constitution — Physical AI & Humanoid Robotics Book (Docusaurus)
 
-## Core Principles
+## Core principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### 1) No fluff, only useful
+We write for builders. Every section must explain “why” and “how”. Avoid marketing language.
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### 2) Runnable by default (non-negotiable)
+All labs and code must be runnable on Ubuntu 22.04 + ROS 2 Humble, unless explicitly labeled optional. Commands must be copy-paste friendly and include expected outputs or verification steps.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### 3) Chapter structure is fixed
+Every chapter must include:
+- Prerequisites
+- Concepts
+- Hands-on lab (step-by-step)
+- Troubleshooting
+- Short quiz (5–10 questions)
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### 4) Prefer ROS 2 Python (rclpy)
+Use `rclpy` first. If C++ is shown, provide a Python equivalent or justify why C++ is required.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### 5) Explicit hardware guidance
+Whenever hardware is mentioned, clearly separate:
+- Minimum (works, slower/limited)
+- Recommended (smooth)
+- “Will not work” constraints (e.g., Isaac Sim needs RTX)
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+## Scope (must cover)
+- Physical AI / embodied intelligence + sensors
+- ROS 2: nodes, topics, services, actions, launch, parameters
+- URDF basics for humanoids
+- Simulation: Gazebo (required) and Unity (optional/advanced)
+- NVIDIA Isaac Sim + Isaac ROS: synthetic data, VSLAM, navigation
+- Nav2 basics
+- Vision-Language-Action: Whisper voice → LLM planning → ROS actions
+- Capstone: voice command → plan → navigate → identify object → manipulate
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
-
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
-
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+## Repo + deployment constraints
+- Docusaurus v3 site.
+- Deploy to GitHub Pages with GitHub Actions.
+- No broken internal links in build.
+- Keep assumptions configurable (url/baseUrl) and clearly documented.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
+- This constitution is the top rule. If any later doc conflicts, update that doc.
+- Any change to scope/structure requires updating the spec + plan + tasks accordingly.
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
-
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2025-12-25 | **Last Amended**: 2025-12-25
