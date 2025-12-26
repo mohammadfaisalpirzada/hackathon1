@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "frontmatter-lab.schema.json",
+  "title": "Lab Frontmatter",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "title", "module", "chapterId"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "module": { "type": "string", "minLength": 1 },
+    "chapterId": { "type": "string", "minLength": 1 },
+    "difficulty": {
+      "type": "string",
+      "enum": ["beginner", "intermediate", "advanced"]
+    },
+    "estimatedTimeMinutes": { "type": "number", "minimum": 0 },
+    "requirements": { "type": "array", "items": { "type": "string" } }
+  }
+}
+

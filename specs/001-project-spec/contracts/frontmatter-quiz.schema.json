@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "frontmatter-quiz.schema.json",
+  "title": "Quiz Frontmatter",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "title", "module", "chapterId"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "module": { "type": "string", "minLength": 1 },
+    "chapterId": { "type": "string", "minLength": 1 },
+    "questionCount": { "type": "number", "minimum": 0 },
+    "estimatedTimeMinutes": { "type": "number", "minimum": 0 }
+  }
+}
+
