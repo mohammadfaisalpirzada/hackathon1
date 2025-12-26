@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from pypdf import PdfReader
-
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -25,16 +24,17 @@ def _normalize(s: str) -> str:
 def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 150) -> List[str]:
     """
     Simple sliding-window chunker.
-    chunk_size/overlap are in characters (good enough for hackathon).
+    chunk_size/overlap are in characters.
     """
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
     out: List[str] = []
     i = 0
+    step = max(1, chunk_size - overlap)
     while i < len(text):
         out.append(text[i : i + chunk_size])
-        i += max(1, chunk_size - overlap)
+        i += step
     return out
 
 
@@ -43,8 +43,7 @@ def load_pdf_chunks(pdf_path: str) -> List[Chunk]:
     chunks: List[Chunk] = []
 
     for page_idx, page in enumerate(reader.pages, start=1):
-        raw = page.extract_text() or ""
-        raw = raw.strip()
+        raw = (page.extract_text() or "").strip()
         if not raw:
             continue
 
@@ -54,7 +53,7 @@ def load_pdf_chunks(pdf_path: str) -> List[Chunk]:
     return chunks
 
 
-def build_index(chunks: List[Chunk]):
+def build_index(chunks: List[Chunk]) -> Tuple[TfidfVectorizer, Any]:
     corpus = [_normalize(c.text) for c in chunks]
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 2),
@@ -78,4 +77,13 @@ def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
 
     sims = cosine_similarity(qv, X)[0]
     top_idx = sims.argsort()[::-1][:k]
-    return [chunks[i] for i in top_idx if sims[i] > 0.0]
+
+    out: List[Chunk] = []
+    for i in top_idx:
+        if sims[i] <= 0.0:
+            continue
+        c = chunks[i]
+        c.meta["score"] = float(sims[i])
+        out.append(c)
+
+    return out

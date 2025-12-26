@@ -131,5 +131,14 @@ def pdf_chat(req: ChatRequest):
     if not hits:
         return {"answer": "No relevant text found in PDF for this question."}
 
-    context = "\n\n---\n\n".join([f"[p.{h.meta['page']}] {h.text}" for h in hits])
-    return {"answer": context}
+    
+    snippets = []
+    sources = []
+    for h in hits:
+        page = h.meta.get("page")
+        score = h.meta.get("score", 0.0)
+        sources.append({"page": page, "score": score})
+        snippets.append(h.text[:400])  # limit each chunk
+
+    answer = "\n\n---\n\n".join([f"[p.{sources[i]['page']}, score={sources[i]['score']:.3f}] {snippets[i]}" for i in range(len(snippets))])
+    return {"answer": answer, "sources": sources}       
