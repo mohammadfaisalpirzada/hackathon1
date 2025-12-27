@@ -13,6 +13,55 @@ interface Answer {
 
 export default function ChatPage() {
   const API_BASE = "http://127.0.0.1:8000";
+  const HIGHLIGHT_MIN_LEN = 3;
+
+  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const getHighlightTokens = (query: string): string[] => {
+    const tokens = (query || "")
+      .trim()
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= HIGHLIGHT_MIN_LEN);
+
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const token of tokens) {
+      const key = token.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(token);
+    }
+
+    unique.sort((a, b) => b.length - a.length);
+    return unique;
+  };
+
+  const renderHighlightedText = (text: string, query: string): React.ReactNode => {
+    const tokens = getHighlightTokens(query);
+    if (!tokens.length) return text;
+
+    const pattern = new RegExp(`(${tokens.map(escapeRegExp).join("|")})`, "gi");
+    const parts = text.split(pattern);
+
+    return parts.map((part, idx) => {
+      if (idx % 2 === 1) {
+        return (
+          <mark
+            key={idx}
+            style={{
+              backgroundColor: "#ffeb3b",
+              padding: "0 2px",
+              borderRadius: 2,
+            }}
+          >
+            {part}
+          </mark>
+        );
+      }
+      return <React.Fragment key={idx}>{part}</React.Fragment>;
+    });
+  };
 
   // PDF RAG chat
   const [msg, setMsg] = useState("");
@@ -96,8 +145,12 @@ export default function ChatPage() {
     }
   }
 
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>, callback: () => void): void => {
-    if (e.ctrlKey && e.key === "Enter") callback();
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>, callback: () => void): void => {
+    if (e.nativeEvent.isComposing) return;
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      callback();
+    }
   };
 
   return (
@@ -113,7 +166,7 @@ export default function ChatPage() {
         <textarea
           value={msg}
           onChange={(e) => setMsg(e.target.value)}
-          onKeyPress={(e) => handleKeyPress(e, send)}
+          onKeyDown={(e) => handleKeyDown(e, send)}
           placeholder="Ask something... (Ctrl+Enter to send)"
           rows={4}
           style={{ width: "100%", padding: 12, fontFamily: "monospace" }}
@@ -135,7 +188,7 @@ export default function ChatPage() {
           <div style={{ marginTop: 16, backgroundColor: "#f5f5f5", padding: 16, borderRadius: 4 }}>
             <h3>✅ Answer</h3>
             <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", overflow: "auto" }}>
-              {answer}
+              {renderHighlightedText(answer, msg)}
             </pre>
 
             {sources.length ? (
@@ -175,8 +228,12 @@ export default function ChatPage() {
           <input
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            onKeyPress={(e) => {
-              if (e.key === "Enter") askOnText();
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                askOnText();
+              }
             }}
             placeholder='e.g., "summarize" or "What does this paragraph say?"'
             style={{ width: "100%", padding: 12, fontFamily: "monospace" }}
@@ -199,7 +256,7 @@ export default function ChatPage() {
           <div style={{ marginTop: 16, backgroundColor: "#f5f5f5", padding: 16, borderRadius: 4 }}>
             <h3>✅ Answer (from selected text only)</h3>
             <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", overflow: "auto" }}>
-              {selAnswer}
+              {renderHighlightedText(selAnswer, question)}
             </pre>
           </div>
         ) : null}

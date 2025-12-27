@@ -4,36 +4,46 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from embed import embed_query
 from qdrant_store import search as qdrant_search
 
-# Gemini (optional)
-import google.generativeai as genai
+# ✅ New Gemini SDK
+from google import genai
+from google.genai import types
+from google.genai.errors import ClientError
 
 
 # ---- Load .env from apps/api/.env no matter where uvicorn is launched ----
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True)
 
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "hackathon1_book_v2")
+# ---------------- Config ----------------
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "hackathon1_book_v2").strip()
+TOP_K = int(os.getenv("TOP_K", "5"))
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.25"))
 
-GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "8000"))
+MAX_CHUNK_CHARS = int(os.getenv("MAX_CHUNK_CHARS", "1200"))
+
+GEMINI_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
+
+gemini_client: Optional[genai.Client] = None
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-
+    gemini_client = genai.Client(api_key=GEMINI_KEY)
 
 # ---------------- Logging ----------------
 logger = logging.getLogger("hackathon_rag_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 # ---------------- App ----------------
-app = FastAPI(title="Hackathon RAG API", version="0.0.4")
+app = FastAPI(title="Hackathon RAG API", version="0.0.7")
 
 # ---------------- CORS ----------------
 ALLOWED_ORIGINS = [
@@ -54,7 +64,7 @@ app.add_middleware(
 
 # ---------------- Models ----------------
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1)
 
 
 class AskOnTextRequest(BaseModel):
@@ -62,15 +72,39 @@ class AskOnTextRequest(BaseModel):
     question: str
 
 
+class HitOut(BaseModel):
+    page: str = "?"
+    score: float = 0.0
+    text: str = ""
+
+
+class RagResponse(BaseModel):
+    ok: bool = True
+    collection: str = QDRANT_COLLECTION
+    threshold: float = SCORE_THRESHOLD
+    hits: List[HitOut] = []
+    answer: str = ""
+    error: str = ""
+    llm_error: str = ""
+
+
 # ---------------- Basic endpoints ----------------
 @app.get("/")
 def root():
-    return {"name": "Master Sahub Hackathon RAG API", "status": "ok"}
+    return {"name": "Hackathon RAG API", "status": "ok"}
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "qdrant_collection": QDRANT_COLLECTION, "gemini_enabled": bool(GEMINI_KEY)}
+    return {
+        "ok": True,
+        "qdrant_collection": QDRANT_COLLECTION,
+        "score_threshold": SCORE_THRESHOLD,
+        "top_k": TOP_K,
+        "gemini_key_present": bool(GEMINI_KEY),
+        "gemini_client_created": bool(gemini_client),
+        "gemini_model": GEMINI_MODEL if gemini_client else None,
+    }
 
 
 @app.post("/chat")
@@ -114,72 +148,73 @@ def ask_on_text(req: AskOnTextRequest):
     return {"answer": "\n".join(top_lines)}
 
 
-# ---------------- PDF RAG via Qdrant: snippets ----------------
-@app.post("/pdf_chat")
-def pdf_chat(req: ChatRequest):
-    q = (req.message or "").strip()
-    if not q:
-        return {"answer": "Empty question.", "sources": []}
-
-    # light query boost
+# ---------------- Helpers ----------------
+def _maybe_boost_query(q: str) -> str:
     boosted = q
     if re.search(r"\bros\s*2\b|\bros2\b|\bros\b", q.lower()):
         boosted += " ROS2 ROS 2 architecture middleware nodes topics services actions rclcpp rclpy"
+    return boosted
 
-    qv = embed_query(boosted)
-    hits = qdrant_search(QDRANT_COLLECTION, qv, limit=5)
 
-    if not hits:
-        return {"answer": "No relevant text found in Qdrant.", "sources": []}
+def _safe_embed(q: str) -> Tuple[Optional[List[float]], str]:
+    """
+    Never silently returns junk.
+    """
+    try:
+        v = embed_query(q)
+        if not isinstance(v, list) or not v:
+            return None, "Embedding returned empty vector."
+        if all(abs(x) < 1e-12 for x in v):
+            return None, "Embedding vector is all zeros (embedder likely failing)."
+        # Log minimal debug to confirm it's sane
+        logger.info("embed len=%d first5=%s", len(v), v[:5])
+        return v, ""
+    except Exception as e:
+        logger.exception("Embedding failed: %s", e)
+        return None, f"Embedding failed: {e}"
 
-    sources = []
-    parts = []
 
+def _raw_scores(hits: List[Any]) -> List[Tuple[float, Any]]:
+    out: List[Tuple[float, Any]] = []
     for h in hits:
-        payload = h.payload or {}
-        page = payload.get("page", "?")
-        text = (payload.get("text", "") or "").strip()
-        score = float(getattr(h, "score", 0.0))
-
-        sources.append({"page": str(page), "score": score})
-        parts.append(f"[p.{page}, score={score:.3f}] {text[:450]}")
-
-    return {"answer": "\n\n---\n\n".join(parts), "sources": sources}
+        out.append((float(getattr(h, "score", 0.0)), (getattr(h, "payload", {}) or {}).get("page")))
+    return out
 
 
-# ---------------- PDF RAG via Qdrant: clean final answer (Gemini optional) ----------------
-@app.post("/pdf_answer")
-def pdf_answer(req: ChatRequest):
-    q = (req.message or "").strip()
-    if not q:
-        return {"answer": "Empty question.", "sources": []}
+def _filter_hits(hits: List[Any], min_score: float) -> List[Any]:
+    return [h for h in hits if float(getattr(h, "score", 0.0)) >= min_score]
 
-    boosted = q
-    if re.search(r"\bros\s*2\b|\bros2\b|\bros\b", q.lower()):
-        boosted += " ROS2 ROS 2 architecture middleware nodes topics services actions rclcpp rclpy"
 
-    qv = embed_query(boosted)
-    hits = qdrant_search(QDRANT_COLLECTION, qv, limit=5)
+def _to_hitout(h: Any) -> HitOut:
+    payload: Dict[str, Any] = getattr(h, "payload", {}) or {}
+    page = str(payload.get("page", "?"))
+    text = (payload.get("text", "") or "").strip()
+    score = float(getattr(h, "score", 0.0))
+    if len(text) > MAX_CHUNK_CHARS:
+        text = text[:MAX_CHUNK_CHARS]
+    return HitOut(page=page, score=score, text=text)
 
-    if not hits:
-        return {"answer": "No relevant text found in Qdrant.", "sources": []}
 
-    sources = []
-    context_blocks = []
+def _build_context(hits_out: List[HitOut]) -> str:
+    parts: List[str] = []
+    total = 0
+    for h in hits_out:
+        block = f"[p.{h.page}] {h.text}".strip()
+        if not block:
+            continue
+        if total + len(block) > MAX_CONTEXT_CHARS:
+            break
+        parts.append(block)
+        total += len(block)
+    return "\n\n".join(parts)
 
-    for h in hits:
-        payload = h.payload or {}
-        page = payload.get("page", "?")
-        text = (payload.get("text", "") or "").strip()
-        score = float(getattr(h, "score", 0.0))
 
-        sources.append({"page": str(page), "score": score})
-        if text:
-            context_blocks.append(f"[p.{page}] {text}")
-
-    # No Gemini key => fallback to extracted context
-    if not GEMINI_KEY:
-        return {"answer": "\n\n---\n\n".join(context_blocks)[:2500], "sources": sources}
+def _gemini_summarize(question: str, context: str) -> Tuple[str, str]:
+    """
+    Returns (answer, llm_error). Never raises.
+    """
+    if gemini_client is None:
+        return "", "Gemini not configured."
 
     prompt = (
         "You are answering using ONLY the provided textbook context.\n"
@@ -187,13 +222,106 @@ def pdf_answer(req: ChatRequest):
         "- Use ONLY the context.\n"
         "- If the answer is not in the context, say: Not found in the provided pages.\n"
         "- Keep it short and clear (5-8 lines).\n\n"
-        f"Question: {q}\n\n"
+        f"Question: {question}\n\n"
         "Context:\n"
-        + "\n\n".join(context_blocks)
+        f"{context}\n"
     )
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    resp = model.generate_content(prompt)
-    answer = (getattr(resp, "text", "") or "").strip() or "No answer generated."
+    try:
+        resp = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=350,
+            ),
+        )
+        ans = (resp.text or "").strip()
+        if not ans:
+            return "", "Gemini returned empty text."
+        return ans, ""
+    except ClientError as e:
+        logger.exception("Gemini ClientError: %s", e)
+        return "", str(e)
+    except Exception as e:
+        logger.exception("Gemini failed: %s", e)
+        return "", str(e)
 
-    return {"answer": answer, "sources": sources}
+
+# ---------------- PDF RAG via Qdrant: snippets ----------------
+@app.post("/pdf_chat", response_model=RagResponse)
+def pdf_chat(req: ChatRequest) -> RagResponse:
+    q = (req.message or "").strip()
+    if not q:
+        return RagResponse(ok=False, answer="Empty question.", error="Empty message.")
+
+    boosted = _maybe_boost_query(q)
+
+    qv, emb_err = _safe_embed(boosted)
+    if not qv:
+        return RagResponse(ok=False, answer="Embedding failed.", error=emb_err)
+
+    hits = qdrant_search(QDRANT_COLLECTION, qv, limit=TOP_K) or []
+    logger.info("RAW hits (score,page): %s", _raw_scores(hits))
+
+    filtered = _filter_hits(hits, min_score=SCORE_THRESHOLD)
+    logger.info("FILTERED hits count=%d threshold=%.3f", len(filtered), SCORE_THRESHOLD)
+
+    if not filtered:
+        return RagResponse(
+            ok=True,
+            answer="No relevant text found.",
+            hits=[],
+        )
+
+    hits_out = [_to_hitout(h) for h in filtered]
+
+    # snippet-style answer
+    parts = [f"[p.{h.page}, score={h.score:.3f}] {h.text}" for h in hits_out]
+    answer = "\n\n---\n\n".join(parts)
+
+    return RagResponse(
+        ok=True,
+        hits=hits_out,
+        answer=answer,
+    )
+
+
+# ---------------- PDF RAG via Qdrant: clean final answer (Gemini optional) ----------------
+@app.post("/pdf_answer", response_model=RagResponse)
+def pdf_answer(req: ChatRequest) -> RagResponse:
+    q = (req.message or "").strip()
+    if not q:
+        return RagResponse(ok=False, answer="Empty question.", error="Empty message.")
+
+    boosted = _maybe_boost_query(q)
+
+    qv, emb_err = _safe_embed(boosted)
+    if not qv:
+        return RagResponse(ok=False, answer="Embedding failed.", error=emb_err)
+
+    hits = qdrant_search(QDRANT_COLLECTION, qv, limit=TOP_K) or []
+    logger.info("RAW hits (score,page): %s", _raw_scores(hits))
+
+    filtered = _filter_hits(hits, min_score=SCORE_THRESHOLD)
+    logger.info("FILTERED hits count=%d threshold=%.3f", len(filtered), SCORE_THRESHOLD)
+
+    if not filtered:
+        return RagResponse(
+            ok=True,
+            answer="No relevant text found.",
+            hits=[],
+        )
+
+    hits_out = [_to_hitout(h) for h in filtered]
+    context = _build_context(hits_out)
+
+    # fallback always available
+    fallback = "\n\n---\n\n".join([f"[p.{h.page}] {h.text}" for h in hits_out])[:2500]
+
+    # try Gemini; never crash
+    ans, llm_err = _gemini_summarize(q, context)
+    if ans:
+        return RagResponse(ok=True, hits=hits_out, answer=ans)
+    else:
+        return RagResponse(ok=True, hits=hits_out, answer=fallback, llm_error=llm_err)
