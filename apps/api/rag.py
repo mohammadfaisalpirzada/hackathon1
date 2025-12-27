@@ -15,6 +15,7 @@ class Chunk:
     meta: Dict[str, Any]
 
 
+# ---------------- Text utils ----------------
 def _normalize(s: str) -> str:
     s = (s or "").lower()
     s = re.sub(r"\s+", " ", s).strip()
@@ -37,12 +38,52 @@ def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 150) -> List[st
     return out
 
 
-def load_pdf_chunks(pdf_path: str) -> List[Chunk]:
+def _fix_spaced_letters(text: str) -> str:
+    """
+    Fix PDFs where words/acronyms come out as 'R O S 2' or 'H u m a n o i d'.
+
+    Heuristic:
+      - Join ALL-CAPS sequences length>=2, optionally followed by digits: 'R O S 2' -> 'ROS2'
+      - Join any-case sequences length>=3: 'H u m a n o i d' -> 'Humanoid'
+    """
+    if not text:
+        return ""
+
+    # Join ALL-CAPS sequences (and optional trailing digits)
+    text = re.sub(
+        r"\b(?:[A-Z]\s+){1,}[A-Z](?:\s*\d+)?\b",
+        lambda m: m.group(0).replace(" ", ""),
+        text,
+    )
+
+    # Join any-case sequences (len >= 3 letters)
+    text = re.sub(
+        r"\b(?:[A-Za-z]\s+){2,}[A-Za-z](?:\s*\d+)?\b",
+        lambda m: m.group(0).replace(" ", ""),
+        text,
+    )
+
+    return text
+
+
+def preprocess_pdf_text(raw: str, fix_spaced: bool = True) -> str:
+    raw = raw or ""
+    if fix_spaced:
+        raw = _fix_spaced_letters(raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw
+
+
+# ---------------- PDF loading ----------------
+def load_pdf_chunks(pdf_path: str, fix_spaced: bool = True) -> List[Chunk]:
+    """
+    Extract text from each page, preprocess, chunk, attach meta.page.
+    """
     reader = PdfReader(pdf_path)
     chunks: List[Chunk] = []
 
     for page_idx, page in enumerate(reader.pages, start=1):
-        raw = (page.extract_text() or "").strip()
+        raw = preprocess_pdf_text(page.extract_text() or "", fix_spaced=fix_spaced)
         if not raw:
             continue
 
@@ -52,7 +93,11 @@ def load_pdf_chunks(pdf_path: str) -> List[Chunk]:
     return chunks
 
 
+# ---------------- TF-IDF index ----------------
 def build_index(chunks: List[Chunk]) -> Tuple[TfidfVectorizer, Any]:
+    """
+    Build TF-IDF once and reuse.
+    """
     corpus = [_normalize(c.text) for c in chunks]
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 2),
@@ -63,10 +108,16 @@ def build_index(chunks: List[Chunk]) -> Tuple[TfidfVectorizer, Any]:
     return vectorizer, X
 
 
-def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
+def search_chunks_with_index(
+    chunks: List[Chunk],
+    vectorizer: TfidfVectorizer,
+    X: Any,
+    query: str,
+    k: int = 5,
+) -> List[Chunk]:
     """
     Returns top-k chunks with meta['score'] attached.
-    Note: This builds TF-IDF every call. Next improvement: cache vectorizer/X.
+    Uses a pre-built TF-IDF index (vectorizer + X).
     """
     if not chunks:
         return []
@@ -75,9 +126,7 @@ def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
     if not q:
         return []
 
-    vectorizer, X = build_index(chunks)
     qv = vectorizer.transform([q])
-
     sims = cosine_similarity(qv, X)[0]
     top_idx = sims.argsort()[::-1][:k]
 
@@ -86,8 +135,22 @@ def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
         if sims[i] <= 0.0:
             continue
         c = chunks[i]
-        c.meta = dict(c.meta)  # avoid mutating original meta
-        c.meta["score"] = float(sims[i])
-        out.append(c)
-
+        out.append(
+            Chunk(
+                text=c.text,
+                meta={**c.meta, "score": float(sims[i])},
+            )
+        )
     return out
+
+
+# ---------------- Backward-compatible helper ----------------
+def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
+    """
+    Backward compatible: builds TF-IDF every call (slower).
+    Prefer build_index() + search_chunks_with_index().
+    """
+    if not chunks:
+        return []
+    vectorizer, X = build_index(chunks)
+    return search_chunks_with_index(chunks, vectorizer, X, query, k=k)
