@@ -32,7 +32,15 @@ MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "8000"))
 MAX_CHUNK_CHARS = int(os.getenv("MAX_CHUNK_CHARS", "1200"))
 
 GEMINI_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
+# IMPORTANT: you fixed quota by using 2.5-flash. Keep that as default.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+
+# Optional fallback model if primary fails (e.g., quota issues on one model)
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+
+# Generation controls
+GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.2"))
+GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "600"))
 
 gemini_client: Optional[genai.Client] = None
 if GEMINI_KEY:
@@ -43,7 +51,7 @@ logger = logging.getLogger("hackathon_rag_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 # ---------------- App ----------------
-app = FastAPI(title="Hackathon RAG API", version="0.0.7")
+app = FastAPI(title="Hackathon RAG API", version="0.0.8")
 
 # ---------------- CORS ----------------
 ALLOWED_ORIGINS = [
@@ -104,6 +112,10 @@ def health():
         "gemini_key_present": bool(GEMINI_KEY),
         "gemini_client_created": bool(gemini_client),
         "gemini_model": GEMINI_MODEL if gemini_client else None,
+        "gemini_fallback_model": GEMINI_FALLBACK_MODEL or None,
+        "max_context_chars": MAX_CONTEXT_CHARS,
+        "max_chunk_chars": MAX_CHUNK_CHARS,
+        "gemini_max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
     }
 
 
@@ -166,8 +178,6 @@ def _safe_embed(q: str) -> Tuple[Optional[List[float]], str]:
             return None, "Embedding returned empty vector."
         if all(abs(x) < 1e-12 for x in v):
             return None, "Embedding vector is all zeros (embedder likely failing)."
-        # Log minimal debug to confirm it's sane
-        logger.info("embed len=%d first5=%s", len(v), v[:5])
         return v, ""
     except Exception as e:
         logger.exception("Embedding failed: %s", e)
@@ -175,10 +185,10 @@ def _safe_embed(q: str) -> Tuple[Optional[List[float]], str]:
 
 
 def _raw_scores(hits: List[Any]) -> List[Tuple[float, Any]]:
-    out: List[Tuple[float, Any]] = []
-    for h in hits:
-        out.append((float(getattr(h, "score", 0.0)), (getattr(h, "payload", {}) or {}).get("page")))
-    return out
+    return [
+        (float(getattr(h, "score", 0.0)), (getattr(h, "payload", {}) or {}).get("page"))
+        for h in hits
+    ]
 
 
 def _filter_hits(hits: List[Any], min_score: float) -> List[Any]:
@@ -209,42 +219,69 @@ def _build_context(hits_out: List[HitOut]) -> str:
     return "\n\n".join(parts)
 
 
-def _gemini_summarize(question: str, context: str) -> Tuple[str, str]:
+def _prompt_for_answer(question: str, context: str) -> str:
+    """
+    Strict format so the model doesn't cut off mid-list.
+    """
+    return (
+        "Answer using ONLY the context below.\n"
+        "If something is not in the context, say: Not found in the provided pages.\n\n"
+        "Return format (follow exactly):\n"
+        "1) Where ROS 2 is mentioned (pages)\n"
+        "2) Topics included (bullet list)\n\n"
+        f"Question: {question}\n\n"
+        f"Context:\n{context}\n"
+    )
+
+
+def _call_gemini(model_name: str, prompt: str) -> str:
+    """
+    Call Gemini once. Raises on error.
+    """
+    if gemini_client is None:
+        raise RuntimeError("Gemini not configured.")
+
+    resp = gemini_client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=GEMINI_TEMPERATURE,
+            max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+        ),
+    )
+    return (resp.text or "").strip()
+
+
+def _gemini_answer(question: str, context: str) -> Tuple[str, str]:
     """
     Returns (answer, llm_error). Never raises.
+    Tries GEMINI_MODEL first, then GEMINI_FALLBACK_MODEL if set.
     """
     if gemini_client is None:
         return "", "Gemini not configured."
 
-    prompt = (
-        "You are answering using ONLY the provided textbook context.\n"
-        "Rules:\n"
-        "- Use ONLY the context.\n"
-        "- If the answer is not in the context, say: Not found in the provided pages.\n"
-        "- Keep it short and clear (5-8 lines).\n\n"
-        f"Question: {question}\n\n"
-        "Context:\n"
-        f"{context}\n"
-    )
+    prompt = _prompt_for_answer(question, context)
 
     try:
-        resp = gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=350,
-            ),
-        )
-        ans = (resp.text or "").strip()
+        ans = _call_gemini(GEMINI_MODEL, prompt)
         if not ans:
             return "", "Gemini returned empty text."
         return ans, ""
     except ClientError as e:
-        logger.exception("Gemini ClientError: %s", e)
+        # If primary fails, optionally retry fallback
+        logger.exception("Gemini ClientError (model=%s): %s", GEMINI_MODEL, e)
+        if GEMINI_FALLBACK_MODEL:
+            try:
+                ans = _call_gemini(GEMINI_FALLBACK_MODEL, prompt)
+                if not ans:
+                    return "", f"Primary failed; fallback returned empty text. Primary error: {e}"
+                return ans, ""
+            except Exception as e2:
+                logger.exception("Gemini fallback failed (model=%s): %s", GEMINI_FALLBACK_MODEL, e2)
+                return "", f"Primary error: {e} | Fallback error: {e2}"
         return "", str(e)
     except Exception as e:
-        logger.exception("Gemini failed: %s", e)
+        logger.exception("Gemini failed (model=%s): %s", GEMINI_MODEL, e)
         return "", str(e)
 
 
@@ -268,26 +305,16 @@ def pdf_chat(req: ChatRequest) -> RagResponse:
     logger.info("FILTERED hits count=%d threshold=%.3f", len(filtered), SCORE_THRESHOLD)
 
     if not filtered:
-        return RagResponse(
-            ok=True,
-            answer="No relevant text found.",
-            hits=[],
-        )
+        return RagResponse(ok=True, hits=[], answer="No relevant text found.")
 
     hits_out = [_to_hitout(h) for h in filtered]
-
-    # snippet-style answer
     parts = [f"[p.{h.page}, score={h.score:.3f}] {h.text}" for h in hits_out]
     answer = "\n\n---\n\n".join(parts)
 
-    return RagResponse(
-        ok=True,
-        hits=hits_out,
-        answer=answer,
-    )
+    return RagResponse(ok=True, hits=hits_out, answer=answer)
 
 
-# ---------------- PDF RAG via Qdrant: clean final answer (Gemini optional) ----------------
+# ---------------- PDF RAG via Qdrant: clean final answer (Gemini) ----------------
 @app.post("/pdf_answer", response_model=RagResponse)
 def pdf_answer(req: ChatRequest) -> RagResponse:
     q = (req.message or "").strip()
@@ -307,21 +334,15 @@ def pdf_answer(req: ChatRequest) -> RagResponse:
     logger.info("FILTERED hits count=%d threshold=%.3f", len(filtered), SCORE_THRESHOLD)
 
     if not filtered:
-        return RagResponse(
-            ok=True,
-            answer="No relevant text found.",
-            hits=[],
-        )
+        return RagResponse(ok=True, hits=[], answer="No relevant text found.")
 
     hits_out = [_to_hitout(h) for h in filtered]
     context = _build_context(hits_out)
 
-    # fallback always available
+    # Always available fallback (useful for debugging + UI sources)
     fallback = "\n\n---\n\n".join([f"[p.{h.page}] {h.text}" for h in hits_out])[:2500]
 
-    # try Gemini; never crash
-    ans, llm_err = _gemini_summarize(q, context)
+    ans, llm_err = _gemini_answer(q, context)
     if ans:
         return RagResponse(ok=True, hits=hits_out, answer=ans)
-    else:
-        return RagResponse(ok=True, hits=hits_out, answer=fallback, llm_error=llm_err)
+    return RagResponse(ok=True, hits=hits_out, answer=fallback, llm_error=llm_err)
