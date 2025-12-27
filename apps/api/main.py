@@ -14,15 +14,26 @@ from pydantic import BaseModel
 from embed import embed_query
 from qdrant_store import search as qdrant_search
 
+# Gemini (optional)
+import google.generativeai as genai
+
+
 # ---- Load .env from apps/api/.env no matter where uvicorn is launched ----
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True)
+
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "hackathon1_book_v2")
+
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+
 
 # ---------------- Logging ----------------
 logger = logging.getLogger("hackathon_rag_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 # ---------------- App ----------------
-app = FastAPI(title="Hackathon RAG API", version="0.0.3")
+app = FastAPI(title="Hackathon RAG API", version="0.0.4")
 
 # ---------------- CORS ----------------
 ALLOWED_ORIGINS = [
@@ -51,10 +62,6 @@ class AskOnTextRequest(BaseModel):
     question: str
 
 
-# ---------------- Config ----------------
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "hackathon1_book")
-
-
 # ---------------- Basic endpoints ----------------
 @app.get("/")
 def root():
@@ -63,7 +70,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "qdrant_collection": QDRANT_COLLECTION}
+    return {"ok": True, "qdrant_collection": QDRANT_COLLECTION, "gemini_enabled": bool(GEMINI_KEY)}
 
 
 @app.post("/chat")
@@ -107,35 +114,86 @@ def ask_on_text(req: AskOnTextRequest):
     return {"answer": "\n".join(top_lines)}
 
 
-# ---------------- PDF RAG via Qdrant (vector DB) ----------------
-
-from fastapi import HTTPException
-
+# ---------------- PDF RAG via Qdrant: snippets ----------------
 @app.post("/pdf_chat")
 def pdf_chat(req: ChatRequest):
-    try:
-        q = (req.message or "").strip()
-        if not q:
-            return {"answer": "Empty question.", "sources": []}
+    q = (req.message or "").strip()
+    if not q:
+        return {"answer": "Empty question.", "sources": []}
 
-        qv = embed_query(q)
-        hits = qdrant_search(QDRANT_COLLECTION, qv, limit=5)
+    # light query boost
+    boosted = q
+    if re.search(r"\bros\s*2\b|\bros2\b|\bros\b", q.lower()):
+        boosted += " ROS2 ROS 2 architecture middleware nodes topics services actions rclcpp rclpy"
 
-        if not hits:
-            return {"answer": "No relevant text found in Qdrant.", "sources": []}
+    qv = embed_query(boosted)
+    hits = qdrant_search(QDRANT_COLLECTION, qv, limit=5)
 
-        sources = []
-        parts = []
-        for h in hits:
-            payload = h.payload or {}
-            page = payload.get("page", "?")
-            text = (payload.get("text", "") or "").strip()
-            score = float(getattr(h, "score", 0.0))
-            sources.append({"page": str(page), "score": score})
-            parts.append(f"[p.{page}, score={score:.3f}] {text[:450]}")
+    if not hits:
+        return {"answer": "No relevant text found in Qdrant.", "sources": []}
 
-        return {"answer": "\n\n---\n\n".join(parts), "sources": sources}
+    sources = []
+    parts = []
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    for h in hits:
+        payload = h.payload or {}
+        page = payload.get("page", "?")
+        text = (payload.get("text", "") or "").strip()
+        score = float(getattr(h, "score", 0.0))
 
+        sources.append({"page": str(page), "score": score})
+        parts.append(f"[p.{page}, score={score:.3f}] {text[:450]}")
+
+    return {"answer": "\n\n---\n\n".join(parts), "sources": sources}
+
+
+# ---------------- PDF RAG via Qdrant: clean final answer (Gemini optional) ----------------
+@app.post("/pdf_answer")
+def pdf_answer(req: ChatRequest):
+    q = (req.message or "").strip()
+    if not q:
+        return {"answer": "Empty question.", "sources": []}
+
+    boosted = q
+    if re.search(r"\bros\s*2\b|\bros2\b|\bros\b", q.lower()):
+        boosted += " ROS2 ROS 2 architecture middleware nodes topics services actions rclcpp rclpy"
+
+    qv = embed_query(boosted)
+    hits = qdrant_search(QDRANT_COLLECTION, qv, limit=5)
+
+    if not hits:
+        return {"answer": "No relevant text found in Qdrant.", "sources": []}
+
+    sources = []
+    context_blocks = []
+
+    for h in hits:
+        payload = h.payload or {}
+        page = payload.get("page", "?")
+        text = (payload.get("text", "") or "").strip()
+        score = float(getattr(h, "score", 0.0))
+
+        sources.append({"page": str(page), "score": score})
+        if text:
+            context_blocks.append(f"[p.{page}] {text}")
+
+    # No Gemini key => fallback to extracted context
+    if not GEMINI_KEY:
+        return {"answer": "\n\n---\n\n".join(context_blocks)[:2500], "sources": sources}
+
+    prompt = (
+        "You are answering using ONLY the provided textbook context.\n"
+        "Rules:\n"
+        "- Use ONLY the context.\n"
+        "- If the answer is not in the context, say: Not found in the provided pages.\n"
+        "- Keep it short and clear (5-8 lines).\n\n"
+        f"Question: {q}\n\n"
+        "Context:\n"
+        + "\n\n".join(context_blocks)
+    )
+
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    resp = model.generate_content(prompt)
+    answer = (getattr(resp, "text", "") or "").strip() or "No answer generated."
+
+    return {"answer": answer, "sources": sources}

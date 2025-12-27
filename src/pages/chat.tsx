@@ -1,15 +1,23 @@
 import React, { useState } from "react";
 import Layout from "@theme/Layout";
 
+interface Source {
+  page: string;
+  score: number;
+}
+
 interface Answer {
   answer: string;
-  sources?: Array<{ page: string; score: number }>;
+  sources?: Source[];
 }
 
 export default function ChatPage() {
-  // Echo chat (simple)
+  const API_BASE = "http://127.0.0.1:8000";
+
+  // PDF RAG chat
   const [msg, setMsg] = useState("");
   const [answer, setAnswer] = useState<string>("");
+  const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
 
@@ -20,27 +28,50 @@ export default function ChatPage() {
   const [selLoading, setSelLoading] = useState(false);
   const [selError, setSelError] = useState<string>("");
 
-  const API_BASE = "http://127.0.0.1:8000";
+  async function callApi(path: string, payload: any): Promise<Answer> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    // try to read error body for better debugging
+    if (!res.ok) {
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+      } catch {}
+      throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ` - ${bodyText}` : ""}`);
+    }
+
+    return (await res.json()) as Answer;
+  }
 
   async function send(): Promise<void> {
     setLoading(true);
     setError("");
     setAnswer("");
+    setSources([]);
+
+    const payload = { message: msg };
 
     try {
-      const res = await fetch(`${API_BASE}/pdf_chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg }),
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const data = (await res.json()) as Answer;
+      // Try clean answer first
+      const data = await callApi("/pdf_answer", payload);
       setAnswer(data.answer ?? "(no answer field)");
-    } catch (e: unknown) {
-      const errorMsg = e instanceof Error ? e.message : "Request failed";
-      setError(errorMsg);
+      setSources(data.sources ?? []);
+    } catch (e1: unknown) {
+      // If /pdf_answer fails (Gemini missing/500), fallback to snippets
+      try {
+        const data2 = await callApi("/pdf_chat", payload);
+        setAnswer(data2.answer ?? "(no answer field)");
+        setSources(data2.sources ?? []);
+        const errMsg = e1 instanceof Error ? e1.message : "Request failed";
+        setError(`pdf_answer failed, used pdf_chat fallback. Details: ${errMsg}`);
+      } catch (e2: unknown) {
+        const errMsg2 = e2 instanceof Error ? e2.message : "Request failed";
+        setError(errMsg2);
+      }
     } finally {
       setLoading(false);
     }
@@ -52,15 +83,10 @@ export default function ChatPage() {
     setSelAnswer("");
 
     try {
-      const res = await fetch(`${API_BASE}/ask_on_text`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selected_text: selectedText, question }),
+      const data = await callApi("/ask_on_text", {
+        selected_text: selectedText,
+        question,
       });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const data = (await res.json()) as Answer;
       setSelAnswer(data.answer ?? "(no answer field)");
     } catch (e: unknown) {
       const errorMsg = e instanceof Error ? e.message : "Request failed";
@@ -71,9 +97,7 @@ export default function ChatPage() {
   }
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>, callback: () => void): void => {
-    if (e.ctrlKey && e.key === "Enter") {
-      callback();
-    }
+    if (e.ctrlKey && e.key === "Enter") callback();
   };
 
   return (
@@ -85,7 +109,7 @@ export default function ChatPage() {
           Backend: <code>{API_BASE}</code>
         </p>
 
-        <h2>Quick Chat</h2>
+        <h2>PDF Chat</h2>
         <textarea
           value={msg}
           onChange={(e) => setMsg(e.target.value)}
@@ -113,6 +137,19 @@ export default function ChatPage() {
             <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", overflow: "auto" }}>
               {answer}
             </pre>
+
+            {sources.length ? (
+              <div style={{ marginTop: 12 }}>
+                <b>Sources:</b>
+                <ul style={{ marginTop: 8 }}>
+                  {sources.map((s, i) => (
+                    <li key={i}>
+                      Page {s.page} (score {Number(s.score).toFixed(3)})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -147,10 +184,7 @@ export default function ChatPage() {
         </div>
 
         <div style={{ marginTop: 12 }}>
-          <button
-            onClick={askOnText}
-            disabled={selLoading || !selectedText.trim() || !question.trim()}
-          >
+          <button onClick={askOnText} disabled={selLoading || !selectedText.trim() || !question.trim()}>
             {selLoading ? "Asking..." : "Ask"}
           </button>
         </div>

@@ -21,8 +21,8 @@ def _normalize(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+def _chunk_text(text: str, chunk_size: int = 450, overlap: int = 80) -> List[str]:
 
-def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 150) -> List[str]:
     """
     Simple sliding-window chunker (chars-based).
     """
