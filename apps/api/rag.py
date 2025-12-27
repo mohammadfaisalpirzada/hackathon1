@@ -23,10 +23,9 @@ def _normalize(s: str) -> str:
 
 def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 150) -> List[str]:
     """
-    Simple sliding-window chunker.
-    chunk_size/overlap are in characters.
+    Simple sliding-window chunker (chars-based).
     """
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", (text or "")).strip()
     if not text:
         return []
     out: List[str] = []
@@ -65,6 +64,10 @@ def build_index(chunks: List[Chunk]) -> Tuple[TfidfVectorizer, Any]:
 
 
 def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
+    """
+    Returns top-k chunks with meta['score'] attached.
+    Note: This builds TF-IDF every call. Next improvement: cache vectorizer/X.
+    """
     if not chunks:
         return []
 
@@ -83,6 +86,7 @@ def search_chunks(chunks: List[Chunk], query: str, k: int = 3) -> List[Chunk]:
         if sims[i] <= 0.0:
             continue
         c = chunks[i]
+        c.meta = dict(c.meta)  # avoid mutating original meta
         c.meta["score"] = float(sims[i])
         out.append(c)
 
