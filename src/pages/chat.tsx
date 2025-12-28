@@ -1,19 +1,47 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import Layout from "@theme/Layout";
+import useDocusaurusContext from "@docusaurus/useDocusaurusContext";
 
-interface Source {
+type Hit = {
   page: string;
   score: number;
-}
+  text: string;
+};
 
-interface Answer {
-  answer: string;
-  sources?: Source[];
-}
+type RagResponse = {
+  ok?: boolean;
+  collection?: string;
+  threshold?: number;
+  hits?: Hit[];
+  answer?: string;
+  error?: string;
+  llm_error?: string;
+};
 
-export default function ChatPage() {
-  const API_BASE = "http://127.0.0.1:8000";
+export default function ChatPage(): JSX.Element {
+  // ✅ Docusaurus way to read build-time config
+  const { siteConfig } = useDocusaurusContext();
+  const API_BASE = useMemo(() => {
+    const cfg = (siteConfig.customFields as any) || {};
+    // Falls back to local if not provided at build time
+    return (cfg.apiBaseUrl as string) || "http://127.0.0.1:8000";
+  }, [siteConfig]);
+
   const HIGHLIGHT_MIN_LEN = 3;
+
+  // PDF RAG chat
+  const [msg, setMsg] = useState("");
+  const [answer, setAnswer] = useState<string>("");
+  const [hits, setHits] = useState<Hit[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  // Selected-text chat (no LLM)
+  const [selectedText, setSelectedText] = useState("");
+  const [question, setQuestion] = useState("");
+  const [selAnswer, setSelAnswer] = useState<string>("");
+  const [selLoading, setSelLoading] = useState(false);
+  const [selError, setSelError] = useState<string>("");
 
   const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -63,60 +91,68 @@ export default function ChatPage() {
     });
   };
 
-  // PDF RAG chat
-  const [msg, setMsg] = useState("");
-  const [answer, setAnswer] = useState<string>("");
-  const [sources, setSources] = useState<Source[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>("");
-
-  // Selected-text chat (constrained)
-  const [selectedText, setSelectedText] = useState("");
-  const [question, setQuestion] = useState("");
-  const [selAnswer, setSelAnswer] = useState<string>("");
-  const [selLoading, setSelLoading] = useState(false);
-  const [selError, setSelError] = useState<string>("");
-
-  async function callApi(path: string, payload: any): Promise<Answer> {
-    const res = await fetch(`${API_BASE}${path}`, {
+  async function postJson<T>(path: string, payload: any): Promise<T> {
+    const url = `${API_BASE}${path}`;
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
-    // try to read error body for better debugging
+    const text = await res.text(); // read once
     if (!res.ok) {
-      let bodyText = "";
-      try {
-        bodyText = await res.text();
-      } catch {}
-      throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ` - ${bodyText}` : ""}`);
+      throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` - ${text}` : ""}`);
     }
 
-    return (await res.json()) as Answer;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new Error(`Invalid JSON from server: ${text.slice(0, 400)}`);
+    }
+  }
+
+  function extractRag(data: RagResponse): { answer: string; hits: Hit[]; warn: string } {
+    const a = (data.answer || "").trim();
+    const h = Array.isArray(data.hits) ? data.hits : [];
+    const serverErr = (data.error || "").trim();
+    const llmErr = (data.llm_error || "").trim();
+
+    let warn = "";
+    if (serverErr) warn = serverErr;
+    else if (llmErr) warn = `LLM fallback used: ${llmErr}`;
+
+    return { answer: a, hits: h, warn };
   }
 
   async function send(): Promise<void> {
+    const q = msg.trim();
+    if (!q) return;
+
     setLoading(true);
     setError("");
     setAnswer("");
-    setSources([]);
-
-    const payload = { message: msg };
+    setHits([]);
 
     try {
-      // Try clean answer first
-      const data = await callApi("/pdf_answer", payload);
-      setAnswer(data.answer ?? "(no answer field)");
-      setSources(data.sources ?? []);
+      // ✅ Prefer /pdf_answer
+      const data = await postJson<RagResponse>("/pdf_answer", { message: q });
+      const out = extractRag(data);
+
+      setAnswer(out.answer || "No answer returned.");
+      setHits(out.hits);
+
+      // If backend says Gemini failed (llm_error) we still show answer but warn
+      if (out.warn) setError(out.warn);
     } catch (e1: unknown) {
-      // If /pdf_answer fails (Gemini missing/500), fallback to snippets
+      // ✅ Fallback to /pdf_chat if /pdf_answer totally fails
       try {
-        const data2 = await callApi("/pdf_chat", payload);
-        setAnswer(data2.answer ?? "(no answer field)");
-        setSources(data2.sources ?? []);
+        const data2 = await postJson<RagResponse>("/pdf_chat", { message: q });
+        const out2 = extractRag(data2);
+        setAnswer(out2.answer || "No answer returned.");
+        setHits(out2.hits);
+
         const errMsg = e1 instanceof Error ? e1.message : "Request failed";
-        setError(`pdf_answer failed, used pdf_chat fallback. Details: ${errMsg}`);
+        setError(`pdf_answer failed, used pdf_chat. Details: ${errMsg}`);
       } catch (e2: unknown) {
         const errMsg2 = e2 instanceof Error ? e2.message : "Request failed";
         setError(errMsg2);
@@ -127,16 +163,26 @@ export default function ChatPage() {
   }
 
   async function askOnText(): Promise<void> {
+    const t = selectedText.trim();
+    const q = question.trim();
+    if (!t || !q) return;
+
     setSelLoading(true);
     setSelError("");
     setSelAnswer("");
 
     try {
-      const data = await callApi("/ask_on_text", {
-        selected_text: selectedText,
-        question,
+      const data = await postJson<{ answer?: string; error?: string }>("/ask_on_text", {
+        selected_text: t,
+        question: q,
       });
-      setSelAnswer(data.answer ?? "(no answer field)");
+
+      const a = (data.answer || "").trim();
+      if (!a) {
+        setSelError((data.error || "No answer returned.").trim());
+      } else {
+        setSelAnswer(a);
+      }
     } catch (e: unknown) {
       const errorMsg = e instanceof Error ? e.message : "Request failed";
       setSelError(errorMsg);
@@ -146,7 +192,7 @@ export default function ChatPage() {
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>, callback: () => void): void => {
-    if (e.nativeEvent.isComposing) return;
+    if ((e as any).nativeEvent?.isComposing) return;
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
       callback();
@@ -156,7 +202,7 @@ export default function ChatPage() {
   return (
     <Layout title="Chatbot" description="Course chatbot">
       <main style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1rem" }}>
-        <h1>🤖 Course Chatbot (Local)</h1>
+        <h1>🤖 Course Chatbot</h1>
 
         <p>
           Backend: <code>{API_BASE}</code>
@@ -172,32 +218,49 @@ export default function ChatPage() {
           style={{ width: "100%", padding: 12, fontFamily: "monospace" }}
         />
 
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
           <button onClick={send} disabled={loading || !msg.trim()}>
             {loading ? "Sending..." : "Send"}
+          </button>
+
+          <button
+            onClick={() => {
+              setMsg("");
+              setAnswer("");
+              setHits([]);
+              setError("");
+            }}
+            disabled={loading}
+          >
+            Clear
           </button>
         </div>
 
         {error ? (
           <p style={{ marginTop: 12, color: "#d9534f" }}>
-            <b>❌ Error:</b> {error}
+            <b>⚠️ Note:</b> {error}
           </p>
         ) : null}
 
         {answer ? (
-          <div style={{ marginTop: 16, backgroundColor: "#f5f5f5", padding: 16, borderRadius: 4 }}>
+          <div style={{ marginTop: 16, backgroundColor: "#f5f5f5", padding: 16, borderRadius: 6 }}>
             <h3>✅ Answer</h3>
             <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", overflow: "auto" }}>
               {renderHighlightedText(answer, msg)}
             </pre>
 
-            {sources.length ? (
-              <div style={{ marginTop: 12 }}>
-                <b>Sources:</b>
+            {hits.length ? (
+              <div style={{ marginTop: 14 }}>
+                <b>Top matches:</b>
                 <ul style={{ marginTop: 8 }}>
-                  {sources.map((s, i) => (
-                    <li key={i}>
-                      Page {s.page} (score {Number(s.score).toFixed(3)})
+                  {hits.map((h, i) => (
+                    <li key={i} style={{ marginBottom: 10 }}>
+                      <div>
+                        <b>Page {h.page}</b> (score {Number(h.score).toFixed(3)})
+                      </div>
+                      <div style={{ fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
+                        {renderHighlightedText(h.text, msg)}
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -229,7 +292,7 @@ export default function ChatPage() {
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if ((e as any).nativeEvent?.isComposing) return;
               if (e.key === "Enter") {
                 e.preventDefault();
                 askOnText();
@@ -240,9 +303,21 @@ export default function ChatPage() {
           />
         </div>
 
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
           <button onClick={askOnText} disabled={selLoading || !selectedText.trim() || !question.trim()}>
             {selLoading ? "Asking..." : "Ask"}
+          </button>
+
+          <button
+            onClick={() => {
+              setSelectedText("");
+              setQuestion("");
+              setSelAnswer("");
+              setSelError("");
+            }}
+            disabled={selLoading}
+          >
+            Clear
           </button>
         </div>
 
@@ -253,7 +328,7 @@ export default function ChatPage() {
         ) : null}
 
         {selAnswer ? (
-          <div style={{ marginTop: 16, backgroundColor: "#f5f5f5", padding: 16, borderRadius: 4 }}>
+          <div style={{ marginTop: 16, backgroundColor: "#f5f5f5", padding: 16, borderRadius: 6 }}>
             <h3>✅ Answer (from selected text only)</h3>
             <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", overflow: "auto" }}>
               {renderHighlightedText(selAnswer, question)}

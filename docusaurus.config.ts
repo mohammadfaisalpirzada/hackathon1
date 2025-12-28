@@ -16,6 +16,12 @@ const owner = process.env.GITHUB_REPOSITORY_OWNER ?? DEFAULT_OWNER;
 const url = process.env.DOCUSAURUS_URL ?? `https://${owner}.github.io`;
 const baseUrl = process.env.DOCUSAURUS_BASE_URL ?? `/${repoName}/`;
 
+customFields: {
+  apiBaseUrl: process.env.API_BASE_URL || "http://127.0.0.1:8000",
+},
+
+
+
 const config: Config = {
   title: "Physical AI & Humanoid Robotics (Quarter 2)",
   tagline: "ROS 2 + simulation for intermediate developers",
